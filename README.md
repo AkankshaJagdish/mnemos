@@ -1,6 +1,6 @@
 # Mnemos
 
-**Mnemos is a personal research assistant with persistent memory.** It combines a Streamlit interface, a FastAPI backend, SQLite persistence, NVIDIA Nemotron inference through Nebius Token Factory, and optional live web research through Tavily.
+**Mnemos is a personal research assistant with persistent memory.** It combines a Streamlit interface, a FastAPI backend, SQLAlchemy-backed persistence (SQLite locally; PostgreSQL recommended for hosted persistent storage), NVIDIA Nemotron inference through Nebius Token Factory, and optional live web research through Tavily.
 
 The implementation is an MVP. Model IDs and API access can vary by account; verify the selected models in the Token Factory catalog before relying on them.
 
@@ -10,7 +10,7 @@ The implementation is an MVP. Model IDs and API access can vary by account; veri
 - Passwords stored as PBKDF2 hashes, not plaintext.
 - Signed bearer tokens for protected API endpoints.
 - User-scoped memories and conversations: the backend derives the user identity from the token rather than trusting a client-supplied user ID.
-- SQLite persistence for user data, memories, conversations, and messages.
+- SQLAlchemy-backed persistence (SQLite locally; PostgreSQL recommended for hosted persistent storage) for user data, memories, conversations, and messages.
 - Nebius Token Factory access through the OpenAI-compatible Python SDK.
 - Optional Tavily web research with source links.
 - Visible memory bank and a control to clear saved memories.
@@ -28,7 +28,7 @@ FastAPI backend (backend/main.py)
     |-- /chat
     |-- /memories
     |
-    |-- agent_service -> memory_service -> SQLite
+    |-- agent_service -> memory_service -> configured SQL database
     |                  research_service -> Tavily (optional)
     |                  model_client -> Nebius Token Factory
     v
@@ -220,3 +220,12 @@ mnemos/
 ## License
 
 Mnemos is licensed under the MIT License. See [LICENSE](LICENSE).
+
+
+## Fix 1 deployment notes (2026-10-29)
+
+The current MVP revision includes a new-chat control, best-effort browser refresh login restoration, explicit preference memory fallback, filtering of previously persisted tool-plan JSON from future history, and a Nano retry when the reasoning model returns a recognized internal tool-plan object instead of user-facing prose. See `CHANGES-FIX-1.md`.
+
+For hosted durable storage, configure the existing `DATABASE_URL` with your Supabase PostgreSQL connection and install the PostgreSQL driver already declared in `requirements.txt`. Do not use a local SQLite file for a hosted instance whose filesystem may be ephemeral.
+
+The cookie-based refresh behavior is an MVP convenience only: the cookie is readable by client-side JavaScript and is not a substitute for an HttpOnly production session.

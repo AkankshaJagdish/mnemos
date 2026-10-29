@@ -72,3 +72,64 @@ def test_automatic_memory_extraction_uses_sanitized_user_text_only(client, accou
     assert "assistant response" not in summarized_text.lower()
     memories = client.get("/memories", headers=headers).json()["memories"]
     assert memories[0]["content"] == "User prefers concise answers."
+
+
+def test_explicit_preference_is_saved_when_extractor_returns_no_memory(client, account):
+    _, headers = account
+    fake_settings = type("Settings", (), {"has_nebius_key": True})()
+    prompt = "Please remember this stable preference: I prefer concise answers with a short summary first, followed by numbered steps when instructions are needed."
+    with (
+        patch("backend.routers.chat.get_settings", return_value=fake_settings),
+        patch("backend.services.agent_service.model_client.classify_research_need", new=AsyncMock(return_value=False)),
+        patch("backend.services.agent_service.model_client.answer_with_model", new=AsyncMock(return_value=("Understood.", "super"))),
+        patch("backend.services.agent_service.model_client.summarize_memory", new=AsyncMock(return_value="NO_MEMORY")),
+    ):
+        response = client.post("/chat", headers=headers, json={"message": prompt})
+    assert response.status_code == 200, response.text
+    memories = client.get("/memories", headers=headers).json()["memories"]
+    assert len(memories) == 1
+    assert "I prefer concise answers" in memories[0]["content"]
+
+
+def test_memory_extractor_unexpected_exception_does_not_break_chat_or_explicit_memory(client, account):
+    _, headers = account
+    fake_settings = type("Settings", (), {"has_nebius_key": True})()
+    prompt = "Please remember that I prefer short answers."
+    with (
+        patch("backend.routers.chat.get_settings", return_value=fake_settings),
+        patch("backend.services.agent_service.model_client.classify_research_need", new=AsyncMock(return_value=False)),
+        patch("backend.services.agent_service.model_client.answer_with_model", new=AsyncMock(return_value=("Here is the answer.", "super"))),
+        patch("backend.services.agent_service.model_client.summarize_memory", new=AsyncMock(side_effect=RuntimeError("unexpected extractor error"))),
+    ):
+        response = client.post("/chat", headers=headers, json={"message": prompt})
+    assert response.status_code == 200, response.text
+    assert response.json()["answer"] == "Here is the answer."
+    memories = client.get("/memories", headers=headers).json()["memories"]
+    assert len(memories) == 1
+    assert "prefer short answers" in memories[0]["content"].lower()
+
+
+def test_explicit_current_research_uses_tavily_and_requests_natural_answer(client, account):
+    from backend.schemas import ResearchSource
+
+    _, headers = account
+    fake_settings = type("Settings", (), {"has_nebius_key": True})()
+    prompt = "Search the web for the latest official announcement about NVIDIA Nemotron and include source links."
+    with (
+        patch("backend.routers.chat.get_settings", return_value=fake_settings),
+        patch("backend.services.agent_service.tavily_configured", return_value=True),
+        patch("backend.services.agent_service.search_web", return_value=("Title: Official source\\nEvidence: model announcement", [ResearchSource(title="Official source", url="https://example.com", snippet="model announcement")])) as search,
+        patch("backend.services.agent_service.model_client.classify_research_need", new=AsyncMock(return_value=False)) as classify,
+        patch("backend.services.agent_service.model_client.answer_with_model", new=AsyncMock(return_value=("The announcement confirms availability.", "super"))) as answer,
+        patch("backend.services.agent_service.model_client.summarize_memory", new=AsyncMock(return_value="NO_MEMORY")),
+    ):
+        response = client.post("/chat", headers=headers, json={"message": prompt})
+    assert response.status_code == 200, response.text
+    assert search.called
+    assert not classify.await_count
+    sent_question = answer.await_args.args[0]
+    sent_context = answer.await_args.kwargs["context"]
+    assert "natural language" in sent_question.lower()
+    assert "Do not output JSON" in sent_question
+    assert "model announcement" in sent_context
+    assert response.json()["research_sources"][0]["url"] == "https://example.com"

@@ -109,3 +109,20 @@ async def test_streaming_does_not_restart_after_partial_output():
             chunks.append(chunk)
     assert chunks == [("partial", "super")]
     assert sdk.chat.completions.create.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_plan_json_is_not_shown_and_retries_with_nano():
+    client = ModelClient(api_key="test-key", reasoning_model="super", fast_model="nano")
+    sdk = MagicMock()
+    tool_plan = '{"tool": "web_search", "arguments": {"query": "official announcement"}}'
+    sdk.chat.completions.create = AsyncMock(side_effect=[_completion(tool_plan), _completion("The official announcement says the model is available." )])
+    client._client = sdk
+
+    answer, used_model = await client.chat_with_model([{"role": "user", "content": "Search the web for the latest announcement."}])
+
+    assert answer.startswith("The official announcement")
+    assert answer != tool_plan
+    assert used_model == "nano"
+    assert [call.kwargs["model"] for call in sdk.chat.completions.create.await_args_list] == ["super", "nano"]
+    assert "Do not call tools" in sdk.chat.completions.create.await_args_list[1].kwargs["messages"][0]["content"]

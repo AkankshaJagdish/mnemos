@@ -5,9 +5,12 @@ from typing import Any
 
 import requests
 import streamlit as st
+from streamlit_cookies_controller import CookieController
 
 DEFAULT_API_URL = os.getenv("MNEMOS_API_URL", "http://127.0.0.1:8000").rstrip("/")
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("MNEMOS_FRONTEND_TIMEOUT", "90"))
+AUTH_COOKIE_NAME = "mnemos_access_token"
+AUTH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60
 
 st.set_page_config(
     page_title="Mnemos — Personal Research Assistant",
@@ -102,6 +105,57 @@ def _show_backend_status() -> None:
         st.caption("Backend not connected — start the FastAPI server to chat.")
 
 
+def _cookie_controller() -> CookieController:
+    """Keep one cookie-controller instance per Streamlit session, never a shared global."""
+    if "_mnemos_cookie_controller" not in st.session_state:
+        st.session_state["_mnemos_cookie_controller"] = CookieController(key="mnemos_cookie_state")
+    return st.session_state["_mnemos_cookie_controller"]
+
+
+def _persist_access_token(token: str) -> None:
+    # MVP trade-off: this component cookie is readable by JavaScript, unlike an HttpOnly cookie.
+    _cookie_controller().set(
+        AUTH_COOKIE_NAME, token, max_age=AUTH_COOKIE_MAX_AGE,
+        secure=True, same_site="lax",
+    )
+
+
+def _remove_access_token_cookie() -> None:
+    controller = _cookie_controller()
+    if controller.get(AUTH_COOKIE_NAME) is not None:
+        controller.remove(AUTH_COOKIE_NAME, secure=True, same_site="lax")
+
+
+def _restore_access_token_from_cookie() -> None:
+    """Restore and validate a token after Streamlit creates a fresh WebSocket session."""
+    if st.session_state.get("access_token"):
+        return
+    try:
+        cookie_token = st.context.cookies.get(AUTH_COOKIE_NAME)
+    except Exception:
+        cookie_token = None
+    if not cookie_token:
+        try:
+            cookie_token = _cookie_controller().get(AUTH_COOKIE_NAME)
+        except Exception:
+            cookie_token = None
+    if not cookie_token:
+        return
+    st.session_state.access_token = str(cookie_token)
+    try:
+        profile = _request_json("GET", "/auth/me")
+        st.session_state.user_id = profile.get("user_id")
+        st.session_state.account_email = profile.get("email")
+    except Exception:
+        st.session_state.access_token = None
+        st.session_state.user_id = None
+        st.session_state.account_email = None
+        try:
+            _remove_access_token_cookie()
+        except Exception:
+            pass
+
+
 for key, default in {
     "access_token": None,
     "account_email": None,
@@ -112,66 +166,76 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
+_restore_access_token_from_cookie()
+
 
 def _accept_auth(result: dict[str, Any]) -> None:
     st.session_state.access_token = result["access_token"]
     st.session_state.user_id = result["user_id"]
     st.session_state.account_email = result["email"]
+    _persist_access_token(result["access_token"])
     st.session_state.messages = []
     st.session_state.conversation_id = None
 
 
 if not st.session_state.access_token:
-    st.title("Mnemos")
-    st.write("Sign in or create an account. Your memories and conversations are scoped to your account.")
-    _show_backend_status()
-    tab_login, tab_register = st.tabs(["Sign in", "Create account"])
+    left, right = st.columns([1.08, 1], gap="large")
+    with left:
+        st.markdown("# Mnemos")
+        st.markdown("## Your research, with continuity.")
+        st.write("A personal research assistant combining persistent memory, current web research, and NVIDIA Nemotron models through Nebius Token Factory.")
+        st.divider()
+        st.markdown("**Memory that carries forward**")
+        st.caption("Recall stable preferences and useful context across conversations.")
+        st.markdown("**Research with sources**")
+        st.caption("Use Tavily to retrieve current information and show evidence links.")
+        st.markdown("**A focused assistant**")
+        st.caption("Combine saved context with new questions instead of starting from scratch.")
+        st.caption("Privacy: chat content may be sent to Nebius for inference and research queries may be sent to Tavily. Detected email addresses and phone numbers are redacted from saved memories; raw chat history is not redacted by this memory filter.")
+        _show_backend_status()
 
-    with tab_login:
-        with st.form("login_form"):
-            login_email = st.text_input("Email address", key="login_email")
-            login_password = st.text_input("Password", type="password", key="login_password")
-            login_submit = st.form_submit_button("Sign in", use_container_width=True)
-        if login_submit:
-            try:
-                _accept_auth(_request_json(
-                    "POST", "/auth/login", authenticated=False,
-                    json={"email": login_email, "password": login_password},
-                ))
-                st.rerun()
-            except requests.HTTPError as exc:
+    with right:
+        st.markdown("## Get started")
+        st.write("Sign in or create an account. Your memories and conversations are scoped to your account.")
+        tab_login, tab_register = st.tabs(["Sign in", "Create account"])
+        with tab_login:
+            with st.form("login_form"):
+                login_email = st.text_input("Email address", key="login_email")
+                login_password = st.text_input("Password", type="password", key="login_password")
+                login_submit = st.form_submit_button("Sign in", use_container_width=True)
+            if login_submit:
                 try:
-                    detail = exc.response.json().get("detail", "Sign-in failed.")
-                except Exception:
-                    detail = "Sign-in failed."
-                st.error(str(detail))
-            except requests.RequestException:
-                st.error("Could not connect to the Mnemos backend.")
-
-    with tab_register:
-        with st.form("register_form"):
-            register_email = st.text_input("Email address", key="register_email")
-            register_password = st.text_input("Password (at least 8 characters)", type="password", key="register_password")
-            register_confirm = st.text_input("Confirm password", type="password", key="register_confirm")
-            register_submit = st.form_submit_button("Create account", use_container_width=True)
-        if register_submit:
-            if register_password != register_confirm:
-                st.error("The passwords do not match.")
-            else:
-                try:
-                    _accept_auth(_request_json(
-                        "POST", "/auth/register", authenticated=False,
-                        json={"email": register_email, "password": register_password},
-                    ))
+                    _accept_auth(_request_json("POST", "/auth/login", authenticated=False, json={"email": login_email, "password": login_password}))
                     st.rerun()
                 except requests.HTTPError as exc:
                     try:
-                        detail = exc.response.json().get("detail", "Account creation failed.")
+                        detail = exc.response.json().get("detail", "Sign-in failed.")
                     except Exception:
-                        detail = "Account creation failed."
+                        detail = "Sign-in failed."
                     st.error(str(detail))
                 except requests.RequestException:
                     st.error("Could not connect to the Mnemos backend.")
+        with tab_register:
+            with st.form("register_form"):
+                register_email = st.text_input("Email address", key="register_email")
+                register_password = st.text_input("Password (at least 8 characters)", type="password", key="register_password")
+                register_confirm = st.text_input("Confirm password", type="password", key="register_confirm")
+                register_submit = st.form_submit_button("Create account", use_container_width=True)
+            if register_submit:
+                if register_password != register_confirm:
+                    st.error("The passwords do not match.")
+                else:
+                    try:
+                        _accept_auth(_request_json("POST", "/auth/register", authenticated=False, json={"email": register_email, "password": register_password}))
+                        st.rerun()
+                    except requests.HTTPError as exc:
+                        try:
+                            detail = exc.response.json().get("detail", "Account creation failed.")
+                        except Exception:
+                            detail = "Account creation failed."
+                        st.error(str(detail))
+                    except requests.RequestException:
+                        st.error("Could not connect to the Mnemos backend.")
     st.stop()
 
 
@@ -180,11 +244,19 @@ with st.sidebar:
     st.caption(f"Signed in as {st.session_state.account_email}")
     _show_backend_status()
     if st.button("Sign out", use_container_width=True):
+        try:
+            _remove_access_token_cookie()
+        except Exception:
+            pass
         for key in ("access_token", "account_email", "user_id", "conversation_id"):
             st.session_state[key] = None
         st.session_state.messages = []
         st.rerun()
     st.divider()
+    if st.button("＋ New chat", type="primary", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.conversation_id = None
+        st.rerun()
     st.subheader("Memory Bank")
     try:
         memory_data = _request_json("GET", "/memories")
@@ -233,6 +305,15 @@ for message in st.session_state.messages:
                     url = source.get("url")
                     st.markdown(f"- [{title}]({url})" if url else f"- {title}")
 
+def _looks_like_research_request(text: str) -> bool:
+    lower = text.lower()
+    return any(term in lower for term in (
+        "search the web", "web search", "look up", "latest", "current", "today", "right now",
+        "recent", "news", "announcement", "released", "price of", "available through",
+        "source links", "cite sources", "include sources", "research online",
+    ))
+
+
 prompt = st.chat_input("What would you like to research or think through?")
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -248,16 +329,24 @@ if prompt:
         with st.spinner("Thinking…"):
             try:
                 request_payload = {"message": prompt, "history": history}
+                research_request = _looks_like_research_request(prompt)
+                if research_request:
+                    request_payload["use_web_research"] = True
                 if st.session_state.conversation_id:
                     request_payload["conversation_id"] = st.session_state.conversation_id
                 # Prefer streaming for responsiveness. If the stream fails before any
                 # text is emitted (for example, an older deployment lacks this route),
                 # transparently use the stable JSON endpoint. Never restart after partial output.
                 answer, stream_metadata, emitted, stream_error = "", None, False, None
-                try:
-                    answer, stream_metadata, emitted, stream_error = _stream_chat(request_payload)
-                except (requests.RequestException, ValueError, TypeError):
-                    stream_error = "Streaming endpoint unavailable before output."
+                if not research_request:
+                    try:
+                        answer, stream_metadata, emitted, stream_error = _stream_chat(request_payload)
+                    except (requests.RequestException, ValueError, TypeError):
+                        stream_error = "Streaming endpoint unavailable before output."
+                else:
+                    # Research uses the JSON route so tool-plan text can be detected and retried
+                    # before anything is displayed. Streaming remains the default for normal chat.
+                    stream_error = "Streaming skipped for this research request."
                 if stream_metadata is not None:
                     result = stream_metadata
                     answer = str(result.get("answer", answer))
