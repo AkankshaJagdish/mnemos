@@ -211,6 +211,7 @@ class SkillListResponse(APIModel):
 
 class SkillRunRequest(APIModel):
     input: str = Field(min_length=1, max_length=8000)
+    conversation_id: str | None = Field(default=None, max_length=128)
 
     @field_validator("input")
     @classmethod
@@ -223,6 +224,7 @@ class SkillRunRequest(APIModel):
 class SkillRunResponse(APIModel):
     skill_id: int
     skill_name: str
+    conversation_id: str
     answer: str
     model: str
     research_sources: list[ResearchSource] = Field(default_factory=list)

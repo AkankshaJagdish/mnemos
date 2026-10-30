@@ -71,6 +71,16 @@ def test_run_skill_uses_allowlisted_memory_and_tavily_services(client, account, 
     assert result["model"] == "test-model"
     assert result["tools_used"] == ["memory", "tavily"]
     assert result["research_sources"][0]["url"] == "https://example.com"
+    assert result["conversation_id"]
+    history = client.get(f"/conversations/{result['conversation_id']}", headers=headers)
+    assert history.status_code == 200, history.text
+    saved_messages = history.json()["messages"]
+    assert len(saved_messages) == 2
+    assert saved_messages[0]["role"] == "user"
+    assert "Research Brief" in saved_messages[0]["content"]
+    assert saved_messages[1]["role"] == "assistant"
+    assert "Evidence-led brief" in saved_messages[1]["content"]
+    assert "https://example.com" in saved_messages[1]["content"]
 
 
 def test_skill_run_rejects_other_users_skill(client, account):
@@ -89,3 +99,51 @@ def test_deleting_all_skills_does_not_recreate_templates(client, account):
         response = client.delete(f"/skills/{skill['id']}", headers=headers)
         assert response.status_code == 200
     assert client.get("/skills", headers=headers).json()["skills"] == []
+
+
+def test_skill_run_appends_to_active_conversation(client, account, monkeypatch):
+    _, headers = account
+    skill = client.get("/skills", headers=headers).json()["skills"][1]
+    import backend.routers.chat as chat_router
+    import backend.services.agent_service as agent_service
+    import backend.routers.skills as skill_router
+    import backend.services.skill_service as skill_service
+
+    class FakeSettings:
+        has_nebius_key = True
+
+    async def fake_answer(prompt, *, history=(), context=None, max_tokens=1200):
+        return "Next steps from the skill", "test-model"
+
+    async def fake_chat_answer(prompt, *, history=(), context=None, max_tokens=1600):
+        return "Initial project response", "test-model"
+
+    async def no_research(_message):
+        return False
+
+    async def no_memory(_message):
+        return "NO_MEMORY"
+
+    monkeypatch.setattr(chat_router, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(agent_service.model_client, "answer_with_model", fake_chat_answer)
+    monkeypatch.setattr(agent_service.model_client, "classify_research_need", no_research)
+    monkeypatch.setattr(agent_service.model_client, "summarize_memory", no_memory)
+    chat = client.post("/chat", headers=headers, json={"message": "Initial project context"})
+    assert chat.status_code == 200, chat.text
+    conversation_id = chat.json()["conversation_id"]
+
+    monkeypatch.setattr(skill_router, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(skill_service.model_client, "answer_with_model", fake_answer)
+    result = client.post(f"/skills/{skill['id']}/run", headers=headers, json={
+        "input": "Continue the project", "conversation_id": conversation_id,
+    })
+    assert result.status_code == 200, result.text
+    assert result.json()["conversation_id"] == conversation_id
+    history = client.get(f"/conversations/{conversation_id}", headers=headers)
+    assert history.status_code == 200
+    messages = history.json()["messages"]
+    assert len(messages) == 4
+    assert messages[-2]["role"] == "user"
+    assert "Continue My Work" in messages[-2]["content"]
+    assert messages[-1]["role"] == "assistant"
+    assert "Next steps from the skill" in messages[-1]["content"]

@@ -317,9 +317,23 @@ with st.sidebar:
                 else:
                     try:
                         with st.spinner(f"Running {selected_skill.get('name', 'skill')}…"):
-                            st.session_state.skill_result = _request_json(
-                                "POST", f"/skills/{selected_skill['id']}/run", json={"input": skill_input.strip()}
+                            skill_payload = {"input": skill_input.strip()}
+                            if st.session_state.get("conversation_id"):
+                                skill_payload["conversation_id"] = st.session_state.conversation_id
+                            skill_result = _request_json(
+                                "POST", f"/skills/{selected_skill['id']}/run", json=skill_payload
                             )
+                        st.session_state.conversation_id = skill_result.get(
+                            "conversation_id", st.session_state.get("conversation_id")
+                        )
+                        skill_user_text = f"**{skill_result.get('skill_name', selected_skill.get('name', 'Skill'))}** workflow\n\n{skill_input.strip()}"
+                        st.session_state.messages.append({"role": "user", "content": skill_user_text})
+                        st.session_state.messages.append({
+                            "role": "assistant", "content": skill_result.get("answer", "No answer returned."),
+                            "sources": skill_result.get("research_sources", []),
+                            "tools_used": skill_result.get("tools_used", []),
+                        })
+                        st.session_state.skill_result = None
                         st.rerun()
                     except requests.HTTPError as exc:
                         try:
@@ -430,25 +444,6 @@ with st.sidebar:
             st.error("Could not reach the backend to clear memories.")
 
 st.title("Your research, with continuity")
-if st.session_state.get("skill_result"):
-    skill_result = st.session_state.skill_result
-    st.subheader(f"Skill result: {skill_result.get('skill_name', 'Saved workflow')}")
-    st.markdown(skill_result.get("answer", "No answer returned."))
-    tools_used = skill_result.get("tools_used", [])
-    st.caption("Tools used: " + (", ".join(tools_used) if tools_used else "none (or optional service unavailable)"))
-    if skill_result.get("memories_used"):
-        with st.expander("Saved context used"):
-            for memory in skill_result["memories_used"]:
-                st.markdown(f"- {memory}")
-    if skill_result.get("research_sources"):
-        with st.expander("Skill research sources"):
-            for source in skill_result["research_sources"]:
-                title = source.get("title") or source.get("url") or "Source"
-                url = source.get("url")
-                st.markdown(f"- [{title}]({url})" if url else f"- {title}")
-    if st.button("Dismiss skill result"):
-        st.session_state.skill_result = None
-        st.rerun()
 st.write(
     "Ask a question or continue a line of thought. Mnemos can use your saved memories, "
     "persist conversation history, and run Tavily web research when configured."
@@ -460,6 +455,8 @@ if st.session_state.get("open_saved_conversation"):
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if message.get("tools_used"):
+            st.caption("Skill tools used: " + ", ".join(message["tools_used"]))
         if message.get("sources"):
             with st.expander("Research sources"):
                 for source in message["sources"]:

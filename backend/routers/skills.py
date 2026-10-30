@@ -56,7 +56,7 @@ async def execute_skill(skill_id: int, payload: SkillRunRequest, db: Session = D
         raise HTTPException(status_code=404, detail="Skill not found.")
     _ensure_model_configured()
     try:
-        return await run_skill(db, user.id, skill, payload.input)
+        return await run_skill(db, user.id, skill, payload.input, conversation_id=payload.conversation_id)
     except ModelNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ModelClientError as exc:

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -137,7 +138,27 @@ def _recent_work_context(db: Session, user_id: str, limit: int = 12) -> str:
     return "\n\n".join(chunks)[:12_000]
 
 
-async def run_skill(db: Session, user_id: str, skill: Skill, user_input: str) -> SkillRunResponse:
+def _get_or_create_skill_conversation(
+    db: Session, user_id: str, conversation_id: str | None, first_message: str
+) -> Conversation:
+    """Attach a skill run to the active thread, or create a normal saved thread."""
+    ensure_user(db, user_id)
+    conversation = db.get(Conversation, conversation_id) if conversation_id else None
+    if conversation is not None and conversation.user_id != user_id:
+        conversation = None
+    if conversation is None:
+        title = " ".join(first_message.strip().split())[:80] or "Skill run"
+        conversation = Conversation(id=str(uuid4()), user_id=user_id, title=title)
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+    return conversation
+
+
+async def run_skill(
+    db: Session, user_id: str, skill: Skill, user_input: str,
+    conversation_id: str | None = None,
+) -> SkillRunResponse:
     """Execute an instruction workflow using only the selected built-in capabilities."""
     tools: list[SkillTool] = _tool_list(skill)  # validated against allowlist on read
     contexts: list[str] = []
@@ -175,8 +196,23 @@ async def run_skill(db: Session, user_id: str, skill: Skill, user_input: str) ->
     )
     context = "\n\n".join(contexts) or None
     answer, used_model = await model_client.answer_with_model(prompt, context=context, max_tokens=1200)
+    # Persist skill invocation and answer in the same thread used by ordinary chat.
+    conversation = _get_or_create_skill_conversation(
+        db, user_id, conversation_id, f"{skill.name}: {user_input}"
+    )
+    user_message = f"**{skill.name}** workflow\n\n{user_input.strip()}"
+    source_markdown = ""
+    if sources:
+        source_markdown = "\n\n**Research sources**\n" + "\n".join(
+            f"- [{source.title}]({source.url})" for source in sources
+        )
+    db.add(Message(conversation_id=conversation.id, role="user", content=user_message))
+    db.add(Message(conversation_id=conversation.id, role="assistant", content=answer.strip() + source_markdown))
+    conversation.updated_at = utc_now()
+    db.commit()
+
     return SkillRunResponse(
-        skill_id=skill.id, skill_name=skill.name, answer=answer, model=used_model,
-        research_sources=sources, memories_used=[item.content for item in memories[:5]],
-        tools_used=tools_used,
+        skill_id=skill.id, skill_name=skill.name, conversation_id=conversation.id,
+        answer=answer, model=used_model, research_sources=sources,
+        memories_used=[item.content for item in memories[:5]], tools_used=tools_used,
     )
