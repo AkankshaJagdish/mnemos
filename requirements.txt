@@ -1,5 +1,5 @@
 # Runtime dependencies
-fastapi>=0.115,<1.0
+fastapi[standard]
 uvicorn[standard]>=0.30,<1.0
 sqlalchemy>=2.0,<3.0
 pydantic>=2.8,<3.0
@@ -7,6 +7,7 @@ openai>=1.50,<3.0
 requests>=2.32,<3.0
 streamlit>=1.39,<2.0
 streamlit-cookies-controller>=0.0.3,<1.0
+psycopg
 
 # Test dependencies
 pytest>=8.0,<9.0
