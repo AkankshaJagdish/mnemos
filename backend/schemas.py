@@ -134,3 +134,97 @@ class AuthResponse(APIModel):
     token_type: Literal["bearer"] = "bearer"
     user_id: str
     email: str
+
+
+class ConversationListResponse(APIModel):
+    conversations: list[ConversationRead] = Field(default_factory=list)
+
+
+class ConversationHistoryMessage(APIModel):
+    id: int
+    role: ChatRole
+    content: str
+    created_at: datetime
+
+
+class ConversationHistoryResponse(APIModel):
+    conversation: ConversationRead
+    messages: list[ConversationHistoryMessage] = Field(default_factory=list)
+
+
+SkillTool = Literal["memory", "tavily"]
+
+
+class SkillCreate(APIModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str = Field(default="", max_length=500)
+    instructions: str = Field(min_length=10, max_length=6000)
+    enabled_tools: list[SkillTool] = Field(default_factory=lambda: ["memory"], max_length=2)
+
+    @field_validator("name", "instructions")
+    @classmethod
+    def trim_required_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("This field must not be blank.")
+        return value.strip()
+
+    @field_validator("enabled_tools")
+    @classmethod
+    def unique_tools(cls, value: list[SkillTool]) -> list[SkillTool]:
+        return list(dict.fromkeys(value))
+
+
+class SkillUpdate(APIModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    instructions: str | None = Field(default=None, min_length=10, max_length=6000)
+    enabled_tools: list[SkillTool] | None = Field(default=None, max_length=2)
+
+    @field_validator("name", "instructions")
+    @classmethod
+    def trim_optional_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("This field must not be blank.")
+        return value.strip() if value is not None else None
+
+    @field_validator("enabled_tools")
+    @classmethod
+    def unique_optional_tools(cls, value: list[SkillTool] | None) -> list[SkillTool] | None:
+        return list(dict.fromkeys(value)) if value is not None else None
+
+
+class SkillRead(APIModel):
+    id: int
+    user_id: str
+    name: str
+    description: str
+    instructions: str
+    enabled_tools: list[SkillTool] = Field(default_factory=list)
+    is_template: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class SkillListResponse(APIModel):
+    skills: list[SkillRead] = Field(default_factory=list)
+
+
+class SkillRunRequest(APIModel):
+    input: str = Field(min_length=1, max_length=8000)
+
+    @field_validator("input")
+    @classmethod
+    def input_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Skill input must not be blank.")
+        return value.strip()
+
+
+class SkillRunResponse(APIModel):
+    skill_id: int
+    skill_name: str
+    answer: str
+    model: str
+    research_sources: list[ResearchSource] = Field(default_factory=list)
+    memories_used: list[str] = Field(default_factory=list)
+    tools_used: list[SkillTool] = Field(default_factory=list)

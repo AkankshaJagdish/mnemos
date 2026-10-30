@@ -75,6 +75,8 @@ async def _prepare_chat(db: Session, payload: ChatRequest) -> dict[str, Any]:
     if not history:
         history = _serialize_history(payload.history)
 
+    # New UI requests use an ID only to resume a conversation the current user owns.
+    # A missing or foreign ID creates a new thread; no cross-account message access occurs.
     relevant_memories = retrieve_relevant_memories(db, user_id, payload.message, limit=5)
     memory_context = format_memories(relevant_memories)
     should_search = payload.use_web_research
@@ -205,3 +207,27 @@ async def handle_chat_stream(db: Session, payload: ChatRequest) -> AsyncIterator
         raise ModelClientError("The model stream returned an empty answer.")
     response = await _finalize_chat(db, payload, prepared, answer, used_model)
     yield {"type": "done", "response": response.model_dump()}
+
+
+def list_user_conversations(db: Session, user_id: str, *, limit: int = 100) -> list[Conversation]:
+    """Return the authenticated user's recent conversations, newest activity first."""
+    safe_limit = max(1, min(int(limit), 200))
+    return list(db.scalars(
+        select(Conversation).where(Conversation.user_id == user_id)
+        .order_by(Conversation.updated_at.desc(), Conversation.created_at.desc())
+        .limit(safe_limit)
+    ).all())
+
+
+def get_conversation_messages(db: Session, user_id: str, conversation_id: str) -> tuple[Conversation, list[Message]] | None:
+    """Return thread messages only when the authenticated user owns the thread."""
+    conversation = db.scalar(select(Conversation).where(
+        Conversation.id == conversation_id, Conversation.user_id == user_id
+    ))
+    if conversation is None:
+        return None
+    messages = list(db.scalars(
+        select(Message).where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.asc(), Message.id.asc())
+    ).all())
+    return conversation, messages

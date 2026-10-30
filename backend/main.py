@@ -13,7 +13,9 @@ from backend.config import get_settings
 from backend.database import init_db
 from backend.routers.auth import router as auth_router
 from backend.routers.chat import router as chat_router
+from backend.routers.conversations import router as conversations_router
 from backend.routers.memories import router as memories_router
+from backend.routers.skills import router as skills_router
 
 settings = get_settings()
 logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
@@ -70,4 +72,6 @@ def health() -> dict[str, str | bool]:
 
 app.include_router(auth_router)
 app.include_router(chat_router)
+app.include_router(conversations_router)
 app.include_router(memories_router)
+app.include_router(skills_router)

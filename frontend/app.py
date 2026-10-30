@@ -162,6 +162,7 @@ for key, default in {
     "user_id": None,
     "messages": [],
     "conversation_id": None,
+    "skill_result": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -179,6 +180,9 @@ def _accept_auth(result: dict[str, Any]) -> None:
 
 
 if not st.session_state.access_token:
+    st.markdown("""<style>
+    .block-container {padding-top: 1.35rem; padding-bottom: 1rem;}
+    </style>""", unsafe_allow_html=True)
     left, right = st.columns([1.08, 1], gap="large")
     with left:
         st.markdown("# Mnemos")
@@ -256,7 +260,144 @@ with st.sidebar:
     if st.button("＋ New chat", type="primary", use_container_width=True):
         st.session_state.messages = []
         st.session_state.conversation_id = None
+        st.session_state.open_saved_conversation = None
         st.rerun()
+    st.subheader("Conversation history")
+    try:
+        conversation_data = _request_json("GET", "/conversations", params={"limit": 100})
+        conversations = conversation_data.get("conversations", [])
+        if conversations:
+            for saved_chat in conversations:
+                chat_id = str(saved_chat.get("id", ""))
+                title = str(saved_chat.get("title") or "Saved conversation")
+                label = title if len(title) <= 42 else title[:39] + "…"
+                if st.button(label, key=f"open_chat_{chat_id}", use_container_width=True, help=title):
+                    try:
+                        detail = _request_json("GET", f"/conversations/{chat_id}")
+                        st.session_state.conversation_id = chat_id
+                        st.session_state.messages = [
+                            {"role": item["role"], "content": item["content"], "sources": []}
+                            for item in detail.get("messages", [])
+                            if item.get("role") in {"user", "assistant"}
+                        ]
+                        st.session_state.open_saved_conversation = chat_id
+                        st.rerun()
+                    except requests.RequestException:
+                        st.error("Could not load this saved conversation.")
+        else:
+            st.caption("No saved conversations yet.")
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code not in (404,):
+            st.caption("Conversation history is not available.")
+        elif exc.response is not None and exc.response.status_code == 404:
+            st.caption("Conversation history endpoint is not deployed yet.")
+    except requests.RequestException:
+        st.caption("Conversation history is not available.")
+    st.divider()
+    st.subheader("Saved skills")
+    try:
+        skills_data = _request_json("GET", "/skills")
+        skills = skills_data.get("skills", [])
+        if skills:
+            skill_options = {f"{item.get('name', 'Skill')} · #{item.get('id')}": item for item in skills}
+            selected_label = st.selectbox("Choose a workflow", list(skill_options), key="selected_skill_label")
+            selected_skill = skill_options[selected_label]
+            st.caption(selected_skill.get("description", ""))
+
+            with st.form(f"run_skill_{selected_skill['id']}"):
+                skill_input = st.text_area(
+                    "What should this skill work on?",
+                    placeholder="Enter a topic, task, or decision question…",
+                    height=90, key=f"skill_input_{selected_skill['id']}",
+                )
+                run_skill_submit = st.form_submit_button("Run skill", type="primary", use_container_width=True)
+            if run_skill_submit:
+                if not skill_input.strip():
+                    st.warning("Enter a topic or task for this skill.")
+                else:
+                    try:
+                        with st.spinner(f"Running {selected_skill.get('name', 'skill')}…"):
+                            st.session_state.skill_result = _request_json(
+                                "POST", f"/skills/{selected_skill['id']}/run", json={"input": skill_input.strip()}
+                            )
+                        st.rerun()
+                    except requests.HTTPError as exc:
+                        try:
+                            st.error(str(exc.response.json().get("detail", "Skill execution failed.")))
+                        except Exception:
+                            st.error("Skill execution failed.")
+                    except requests.RequestException:
+                        st.error("Could not reach the backend to run this skill.")
+
+            with st.expander("Edit selected skill"):
+                with st.form(f"edit_skill_{selected_skill['id']}"):
+                    edit_name = st.text_input("Name", value=selected_skill.get("name", ""), key=f"edit_name_{selected_skill['id']}")
+                    edit_description = st.text_input("Description", value=selected_skill.get("description", ""), key=f"edit_desc_{selected_skill['id']}")
+                    edit_instructions = st.text_area("Workflow instructions", value=selected_skill.get("instructions", ""), height=150, key=f"edit_instructions_{selected_skill['id']}")
+                    current_tools = selected_skill.get("enabled_tools", [])
+                    edit_memory = st.checkbox("Use saved memories", value="memory" in current_tools, key=f"edit_memory_{selected_skill['id']}")
+                    edit_tavily = st.checkbox("Use Tavily web research", value="tavily" in current_tools, key=f"edit_tavily_{selected_skill['id']}")
+                    save_skill_submit = st.form_submit_button("Save workflow changes", use_container_width=True)
+                if save_skill_submit:
+                    tools = (["memory"] if edit_memory else []) + (["tavily"] if edit_tavily else [])
+                    try:
+                        _request_json("PATCH", f"/skills/{selected_skill['id']}", json={
+                            "name": edit_name, "description": edit_description,
+                            "instructions": edit_instructions, "enabled_tools": tools,
+                        })
+                        st.success("Skill saved.")
+                        st.rerun()
+                    except requests.HTTPError as exc:
+                        try:
+                            st.error(str(exc.response.json().get("detail", "Could not save this skill.")))
+                        except Exception:
+                            st.error("Could not save this skill.")
+                    except requests.RequestException:
+                        st.error("Could not reach the backend to save this skill.")
+                if st.button("Delete selected skill", key=f"delete_skill_{selected_skill['id']}", use_container_width=True):
+                    try:
+                        _request_json("DELETE", f"/skills/{selected_skill['id']}")
+                        st.session_state.pop("selected_skill_label", None)
+                        st.success("Skill deleted.")
+                        st.rerun()
+                    except requests.RequestException:
+                        st.error("Could not delete this skill.")
+
+            with st.expander("Create a custom skill"):
+                with st.form("create_custom_skill"):
+                    new_skill_name = st.text_input("Skill name", placeholder="e.g. Weekly project review")
+                    new_skill_description = st.text_input("What is it for?", placeholder="Short description")
+                    new_skill_instructions = st.text_area("Workflow instructions", height=130, placeholder="Describe the steps and expected output…")
+                    new_skill_memory = st.checkbox("Allow saved memory retrieval", value=True, key="new_skill_memory")
+                    new_skill_tavily = st.checkbox("Allow Tavily web research", value=False, key="new_skill_tavily")
+                    create_skill_submit = st.form_submit_button("Create skill", use_container_width=True)
+                if create_skill_submit:
+                    tools = (["memory"] if new_skill_memory else []) + (["tavily"] if new_skill_tavily else [])
+                    try:
+                        _request_json("POST", "/skills", json={
+                            "name": new_skill_name, "description": new_skill_description,
+                            "instructions": new_skill_instructions, "enabled_tools": tools,
+                        })
+                        st.success("Custom skill created.")
+                        st.rerun()
+                    except requests.HTTPError as exc:
+                        try:
+                            st.error(str(exc.response.json().get("detail", "Could not create this skill.")))
+                        except Exception:
+                            st.error("Could not create this skill.")
+                    except requests.RequestException:
+                        st.error("Could not reach the backend to create this skill.")
+        else:
+            st.caption("No saved skills yet. Create one below.")
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 401:
+            st.warning("Your session expired. Sign in again.")
+        else:
+            st.caption("Skills are not available on this backend yet.")
+    except requests.RequestException:
+        st.caption("Skills are not available on this backend yet.")
+
+    st.divider()
     st.subheader("Memory Bank")
     try:
         memory_data = _request_json("GET", "/memories")
@@ -289,11 +430,32 @@ with st.sidebar:
             st.error("Could not reach the backend to clear memories.")
 
 st.title("Your research, with continuity")
+if st.session_state.get("skill_result"):
+    skill_result = st.session_state.skill_result
+    st.subheader(f"Skill result: {skill_result.get('skill_name', 'Saved workflow')}")
+    st.markdown(skill_result.get("answer", "No answer returned."))
+    tools_used = skill_result.get("tools_used", [])
+    st.caption("Tools used: " + (", ".join(tools_used) if tools_used else "none (or optional service unavailable)"))
+    if skill_result.get("memories_used"):
+        with st.expander("Saved context used"):
+            for memory in skill_result["memories_used"]:
+                st.markdown(f"- {memory}")
+    if skill_result.get("research_sources"):
+        with st.expander("Skill research sources"):
+            for source in skill_result["research_sources"]:
+                title = source.get("title") or source.get("url") or "Source"
+                url = source.get("url")
+                st.markdown(f"- [{title}]({url})" if url else f"- {title}")
+    if st.button("Dismiss skill result"):
+        st.session_state.skill_result = None
+        st.rerun()
 st.write(
     "Ask a question or continue a line of thought. Mnemos can use your saved memories, "
     "persist conversation history, and run Tavily web research when configured."
 )
 st.caption("Privacy: Mnemos redacts detected email addresses and phone numbers from saved memories. Chat content may be sent to Nebius for model inference and search queries may be sent to Tavily when web research is used.")
+if st.session_state.get("open_saved_conversation"):
+    st.info("Viewing a saved conversation. Select **＋ New chat** before starting a separate topic.")
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):

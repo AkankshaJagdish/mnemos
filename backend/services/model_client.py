@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import json
 import re
 from collections.abc import AsyncIterator, Iterable, Mapping
@@ -11,6 +12,9 @@ from backend.config import get_settings
 
 logger = logging.getLogger("mnemos.model_client")
 settings = get_settings()
+DEFAULT_MAX_ANSWER_TOKENS = max(32, int(os.getenv("MNEMOS_MAX_ANSWER_TOKENS", "900")))
+MAX_INPUT_MESSAGES = max(4, int(os.getenv("MNEMOS_MAX_INPUT_MESSAGES", "20")))
+MAX_MESSAGE_CHARS = max(1000, int(os.getenv("MNEMOS_MAX_MESSAGE_CHARS", "12000")))
 
 SYSTEM_PROMPT = (
     "You are Mnemos, a precise personal research assistant. Give useful, direct answers, "
@@ -85,10 +89,29 @@ class ModelClient:
 
     @staticmethod
     def _normalize_messages(messages: Iterable[Mapping[str, str]]) -> list[dict[str, str]]:
-        normalized = [
-            {"role": str(item["role"]), "content": str(item["content"])}
-            for item in messages if item.get("role") and item.get("content") is not None
-        ]
+        source = list(messages)
+        # Preserve all leading system instructions (the base policy and research evidence)
+        # and then keep the most recent dialogue within the configured message budget.
+        leading_systems = []
+        remaining = source
+        while remaining and remaining[0].get("role") == "system":
+            leading_systems.append(remaining[0])
+            remaining = remaining[1:]
+        available = max(1, MAX_INPUT_MESSAGES - len(leading_systems))
+        if len(remaining) > available:
+            remaining = remaining[-available:]
+        source = [*leading_systems, *remaining]
+        normalized = []
+        for item in source:
+            if not item.get("role") or item.get("content") is None:
+                continue
+            content = str(item["content"])
+            # Preserve beginning context (including role instructions/evidence) and its tail.
+            if len(content) > MAX_MESSAGE_CHARS:
+                head_size = MAX_MESSAGE_CHARS * 3 // 4
+                tail_size = MAX_MESSAGE_CHARS - head_size
+                content = content[:head_size] + "\n[content truncated to fit configured context limit]\n" + content[-tail_size:]
+            normalized.append({"role": str(item["role"]), "content": content})
         if not normalized:
             raise ValueError("At least one valid chat message is required.")
         return normalized
@@ -105,7 +128,7 @@ class ModelClient:
         return status == 429 or (isinstance(status, int) and status >= 500)
 
     async def chat_with_model(self, messages: Iterable[Mapping[str, str]], *, model: str | None = None,
-                              temperature: float = 0.3, max_tokens: int = 1200) -> tuple[str, str]:
+                              temperature: float = 0.3, max_tokens: int = DEFAULT_MAX_ANSWER_TOKENS) -> tuple[str, str]:
         """Return (text, model); retry transient Super failures and visible tool-plan output with Nano."""
         client = self._get_client()
         normalized = self._normalize_messages(messages)
@@ -122,7 +145,7 @@ class ModelClient:
 
         try:
             response = await client.chat.completions.create(
-                model=selected_model, messages=normalized, temperature=temperature, max_tokens=max_tokens,
+                model=selected_model, messages=normalized, temperature=temperature, max_tokens=max(8, min(int(max_tokens), DEFAULT_MAX_ANSWER_TOKENS)),
             )
             content = extract_text(response)
             if content:
@@ -149,7 +172,7 @@ class ModelClient:
             fallback_messages.insert(0, {"role": "system", "content": fallback_system})
             try:
                 response = await client.chat.completions.create(
-                    model=self.fast_model, messages=fallback_messages, temperature=temperature, max_tokens=max_tokens,
+                    model=self.fast_model, messages=fallback_messages, temperature=temperature, max_tokens=max(8, min(int(max_tokens), DEFAULT_MAX_ANSWER_TOKENS)),
                 )
                 content = extract_text(response)
                 if content:
@@ -160,7 +183,7 @@ class ModelClient:
                 raise ModelClientError("Both the reasoning model and Nano fallback failed.") from fallback_exc
 
     async def chat(self, messages: Iterable[Mapping[str, str]], *, model: str | None = None,
-                   temperature: float = 0.3, max_tokens: int = 1200) -> str:
+                   temperature: float = 0.3, max_tokens: int = DEFAULT_MAX_ANSWER_TOKENS) -> str:
         text, _ = await self.chat_with_model(messages, model=model, temperature=temperature, max_tokens=max_tokens)
         return text
 
@@ -177,16 +200,16 @@ class ModelClient:
         return messages
 
     async def answer_with_model(self, user_message: str, *, history: Iterable[Mapping[str, str]] = (),
-                                context: str | None = None, max_tokens: int = 1200) -> tuple[str, str]:
+                                context: str | None = None, max_tokens: int = DEFAULT_MAX_ANSWER_TOKENS) -> tuple[str, str]:
         return await self.chat_with_model(self._answer_messages(user_message, history=history, context=context), max_tokens=max_tokens)
 
     async def answer(self, user_message: str, *, history: Iterable[Mapping[str, str]] = (),
-                     context: str | None = None, model: str | None = None, max_tokens: int = 1200) -> str:
+                     context: str | None = None, model: str | None = None, max_tokens: int = DEFAULT_MAX_ANSWER_TOKENS) -> str:
         messages = self._answer_messages(user_message, history=history, context=context)
         return await self.chat(messages, model=model, max_tokens=max_tokens)
 
     async def stream_chat(self, messages: Iterable[Mapping[str, str]], *, model: str | None = None,
-                          temperature: float = 0.3, max_tokens: int = 1200) -> AsyncIterator[tuple[str, str]]:
+                          temperature: float = 0.3, max_tokens: int = DEFAULT_MAX_ANSWER_TOKENS) -> AsyncIterator[tuple[str, str]]:
         """Yield (token, model). Fallback is allowed only before any token is emitted."""
         client = self._get_client()
         normalized = self._normalize_messages(messages)
@@ -195,7 +218,7 @@ class ModelClient:
         try:
             stream = await client.chat.completions.create(
                 model=selected_model, messages=normalized, temperature=temperature,
-                max_tokens=max_tokens, stream=True,
+                max_tokens=max(8, min(int(max_tokens), DEFAULT_MAX_ANSWER_TOKENS)), stream=True,
             )
             async for chunk in stream:
                 if not chunk.choices:
@@ -219,7 +242,7 @@ class ModelClient:
         try:
             stream = await client.chat.completions.create(
                 model=self.fast_model, messages=normalized, temperature=temperature,
-                max_tokens=max_tokens, stream=True,
+                max_tokens=max(8, min(int(max_tokens), DEFAULT_MAX_ANSWER_TOKENS)), stream=True,
             )
             emitted_fallback = False
             async for chunk in stream:
@@ -236,7 +259,7 @@ class ModelClient:
             raise ModelClientError("Both reasoning and Nano streaming failed.") from exc
 
     async def stream_answer(self, user_message: str, *, history: Iterable[Mapping[str, str]] = (),
-                            context: str | None = None, max_tokens: int = 1200) -> AsyncIterator[tuple[str, str]]:
+                            context: str | None = None, max_tokens: int = DEFAULT_MAX_ANSWER_TOKENS) -> AsyncIterator[tuple[str, str]]:
         async for item in self.stream_chat(self._answer_messages(user_message, history=history, context=context), max_tokens=max_tokens):
             yield item
 

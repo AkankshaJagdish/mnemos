@@ -126,3 +126,17 @@ async def test_tool_plan_json_is_not_shown_and_retries_with_nano():
     assert used_model == "nano"
     assert [call.kwargs["model"] for call in sdk.chat.completions.create.await_args_list] == ["super", "nano"]
     assert "Do not call tools" in sdk.chat.completions.create.await_args_list[1].kwargs["messages"][0]["content"]
+
+
+def test_model_client_caps_history_count_and_each_message_length():
+    import os
+    from backend.services.model_client import ModelClient, MAX_INPUT_MESSAGES, MAX_MESSAGE_CHARS
+    client = ModelClient(api_key="test-key")
+    history = [{"role": "user", "content": "x" * (MAX_MESSAGE_CHARS + 100)} for _ in range(MAX_INPUT_MESSAGES + 5)]
+    history.insert(0, {"role": "system", "content": "system instructions"})
+    history.append({"role": "user", "content": "latest user question"})
+    normalized = client._normalize_messages(history)
+    assert len(normalized) == MAX_INPUT_MESSAGES
+    assert normalized[0]["role"] == "system"
+    assert normalized[-1]["content"] == "latest user question"
+    assert all(len(item["content"]) <= MAX_MESSAGE_CHARS + 60 for item in normalized)

@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Generator
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, create_engine, event, inspect, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -50,11 +50,15 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     password_hash: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    skills_initialized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     memories: Mapped[list["Memory"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
     conversations: Mapped[list["Conversation"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    skills: Mapped[list["Skill"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -107,6 +111,24 @@ class Message(Base):
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
 
+class Skill(Base):
+    """A user-owned reusable workflow; execution is limited to allowlisted tools."""
+    __tablename__ = "skills"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled_tools: Mapped[str] = mapped_column(Text, default='["memory"]', nullable=False)
+    is_template: Mapped[bool] = mapped_column(default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    user: Mapped[User] = relationship(back_populates="skills")
+
+
 def init_db() -> None:
     """Create tables and apply the small additive user-column migration for existing MVP DBs."""
     Base.metadata.create_all(bind=engine)
@@ -120,6 +142,8 @@ def init_db() -> None:
                 connection.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(320)"))
             if "password_hash" not in columns:
                 connection.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(500)"))
+            if "skills_initialized" not in columns:
+                connection.execute(text("ALTER TABLE users ADD COLUMN skills_initialized BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users (email)"
             ))
