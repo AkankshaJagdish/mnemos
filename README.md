@@ -1,152 +1,295 @@
 # Mnemos
 
-**Mnemos is a personal research assistant with persistent memory.** It combines a Streamlit interface, a FastAPI backend, SQLAlchemy-backed persistence (SQLite locally; PostgreSQL recommended for hosted persistent storage), NVIDIA Nemotron inference through Nebius Token Factory, and optional live web research through Tavily.
+**Your research, with continuity.**
 
-The implementation is an MVP. Model IDs and API access can vary by account; verify the selected models in the Token Factory catalog before relying on them.
+Mnemos is a personal research assistant that carries useful context across conversations. It combines persistent, account-scoped memory, saved research workflows, live web search through Tavily, and NVIDIA Nemotron inference served by Nebius Token Factory.
+
+Instead of treating every chat as a blank slate, Mnemos can retrieve relevant memories and prior work, research current questions, and run repeatable workflows such as Research Brief, Continue My Work, and Decision Memo. Conversation history and skill results remain available when the user returns.
+
+> **Project status:** Hackathon MVP. The hosted application uses a configured PostgreSQL database; local development defaults to SQLite. Provider access, model availability, and live-service performance depend on the deployment's credentials and configuration. See [Limitations and security](#limitations-and-security).
+
+- **Live demo:** https://mnemosakankshajagdish.streamlit.app
+- **Source code:** https://github.com/AkankshaJagdish/mnemos
+- **Track:** Personal AI
+- **License:** MIT
+
+## Why Mnemos
+
+Research work is cumulative. A useful assistant should retain the user's durable preferences and relevant project context, reconnect a new question to earlier work, and retrieve current evidence when the answer depends on changing information.
+
+Mnemos combines three capabilities:
+
+1. **Memory:** save and retrieve user-scoped preferences and useful context across conversations.
+2. **Research:** search the web with Tavily and preserve source links alongside generated answers.
+3. **Reusable skills:** run saved workflows against the user's input, relevant memory, recent work, and permitted tools.
+
+The user can inspect saved memories, manage workflows, reopen previous conversations, and clear saved memories.
 
 ## Features
 
-- Account registration and login using email and password.
-- Passwords stored as PBKDF2 hashes, not plaintext.
-- Signed bearer tokens for protected API endpoints.
-- User-scoped memories and conversations: the backend derives the user identity from the token rather than trusting a client-supplied user ID.
-- SQLAlchemy-backed persistence (SQLite locally; PostgreSQL recommended for hosted persistent storage) for user data, memories, conversations, and messages.
-- Nebius Token Factory access through the OpenAI-compatible Python SDK.
-- Optional Tavily web research with source links.
-- Visible memory bank and a control to clear saved memories.
-- User-owned saved skills: editable Research Brief, Continue My Work, and Decision Memo workflows, plus custom workflows.
-- Skills can call the existing memory retrieval service and optional Tavily search through a fixed allowlist; saved skills are instructions, not executable code.
-- Automated tests for chat authorization, memory isolation, PII redaction, model fallback, streaming fallback, research behavior, and model-client configuration.
+- Account registration and sign-in.
+- Password hashing and signed bearer-token authentication.
+- Server-side account identity: protected operations derive the user from the verified token rather than trusting a client-supplied user ID.
+- Persistent user-scoped memories, conversations, and messages.
+- Relevance-based memory retrieval using lightweight token overlap.
+- Memory Bank UI and memory deletion.
+- Pattern-based email and phone-number redaction before memory persistence.
+- Tavily-powered web search with source URLs and evidence snippets.
+- Three editable starter skills:
+  - **Research Brief:** gather current evidence and produce a structured, source-linked brief.
+  - **Continue My Work:** recover relevant saved context and recent conversation history, identify unresolved questions, and suggest next steps.
+  - **Decision Memo:** structure a decision around options, evidence, trade-offs, risks, and a recommendation.
+- Custom skills with an allowlist of supported tools (`memory`, `tavily`). Skills are instructions, not arbitrary executable code.
+- Skill invocations and outputs are persisted as ordinary messages in the active conversation.
+- Streaming chat with a non-streaming fallback path.
+- Controlled reasoning-model-to-Nano fallback for eligible failures, with streaming fallback only before any text has been emitted.
+- Automated tests for core application behavior and mocked provider integrations.
 
 ## Architecture
 
 ```text
-Streamlit frontend (frontend/app.py)
-    |
-    | HTTP + bearer token
-    v
-FastAPI backend (backend/main.py)
-    |-- /auth/register, /auth/login, /auth/me
-    |-- /chat
-    |-- /conversations (list/read saved threads)
-    |-- /memories
-    |-- /skills (CRUD + workflow execution)
-    |
-    |-- agent_service -> memory_service -> configured SQL database
-    |                  research_service -> Tavily (optional)
-    |                  model_client -> Nebius Token Factory
-    v
-SQLite locally; Supabase PostgreSQL on the deployed app
+                         USER
+                          |
+                          v
+               Streamlit frontend
+                 frontend/app.py
+                          |
+                 HTTPS / HTTP API
+                 bearer-token auth
+                          |
+                          v
+                    FastAPI API
+                  backend/main.py
+                          |
+        +-----------------+-------------------+
+        |                 |                   |
+        v                 v                   v
+   Auth / users      Chat orchestration    Saved skills
+        |                 |                   |
+        |                 +---------+---------+
+        |                           |
+        v                           v
+  SQLAlchemy data layer       Agent / model client
+        |                           |
+        v                +----------+-----------+
+  PostgreSQL hosted      |                      |
+  SQLite local           v                      v
+                    Nebius Token Factory      Tavily Search
+                    NVIDIA Nemotron           live web evidence
+                    Super + Nano              URLs + snippets
 ```
 
-`backend/routers/` owns HTTP routes; `backend/services/` owns the model, memory, research, and orchestration logic. The frontend does not connect to SQLite directly.
+### Request lifecycle
 
-## Requirements
+1. The user submits a question or runs a saved skill in Streamlit.
+2. FastAPI validates the request and authenticates the account.
+3. Mnemos retrieves relevant memories and, where appropriate, recent conversation context.
+4. The agent determines whether the question needs current web information.
+5. When research is enabled and configured, the research service calls Tavily Search and collects result snippets and source URLs.
+6. The model client sends the prompt and selected context to the configured NVIDIA Nemotron model through Nebius Token Factory.
+7. Eligible transient reasoning-model failures can trigger one Nano fallback attempt. Streaming does not restart after text has been emitted, avoiding duplicated output.
+8. Mnemos persists conversation messages and eligible memory candidates in the configured database.
+9. The frontend displays the response, research sources, and updated memory or conversation history.
 
-- Python 3.11 (the Dockerfile uses Python 3.11).
-- A Nebius Token Factory API key for model-backed chat.
-- A Tavily API key for live web research (optional).
-- Docker, if running the backend in a container.
+### Main components
 
-## Local setup
+| Component | Responsibility |
+| --- | --- |
+| Streamlit | Sign-in, chat, conversation history, Memory Bank, saved skills |
+| FastAPI | API, authentication, validation, orchestration |
+| SQLAlchemy | Database models and persistence |
+| PostgreSQL / SQLite | Accounts, memories, conversations, messages, skills |
+| Model client | Nebius Token Factory chat completions, streaming, model selection and fallback |
+| Memory service | Memory extraction support, redaction, relevance retrieval, deletion |
+| Research service | Tavily Search requests, evidence snippets and source metadata |
+| Skill service | User-owned workflows composed from memory, Tavily and Nemotron |
 
-Run commands from the repository root (`mnemos/`).
+## How we use NVIDIA Nemotron and Nebius
 
-1. Create and activate a virtual environment:
+Mnemos uses NVIDIA Nemotron models served through **Nebius Token Factory**, using its OpenAI-compatible chat-completions API and the OpenAI Python SDK.
 
-   ```bash
-   python -m venv .venv
-   # macOS/Linux
-   source .venv/bin/activate
-   # Windows PowerShell
-   # .venv\Scripts\Activate.ps1
-   ```
+### Configured model IDs
 
-2. Install dependencies:
+The current repository defaults are:
 
-   ```bash
-   python -m pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+| Role | Model ID | Intended use |
+| --- | --- | --- |
+| Reasoning model | `nvidia/nemotron-3-super-120b-a12b` | Main responses, research synthesis, and structured workflow output |
+| Fast model | `nvidia/Nemotron-3-Nano-30B` | Lightweight classification, memory extraction, and eligible fallback |
 
-3. Copy `.env.example` to `.env` and set the secrets. The application reads environment variables; `.env` is a template for your local configuration. Export the values in your shell or use your preferred environment loader. Do not commit `.env`.
+The IDs above are the values configured in the repository. Model names and access can vary by account and catalog version. Confirm both exact IDs against the model catalog available to the deployment before relying on them.
 
-   Minimum for chat:
-   - `NEBIUS_TOKEN_FACTORY_KEY`
-   - `MNEMOS_AUTH_SECRET` (use a long random value)
+### Token Factory endpoints
 
-   Optional:
-   - `TAVILY_API_KEY` enables live research.
-   - `NEBIUS_REASONING_MODEL` and `NEBIUS_FAST_MODEL` override the default model IDs.
-   - `DATABASE_URL` changes the database location.
-   - `CORS_ORIGINS` sets the allowed browser origins if you later add a browser-based frontend.
+The current `backend/config.py` default is:
 
-   Generate a signing secret with:
+```text
+https://api.tokenfactory.nebius.com/v1
+```
 
-   ```bash
-   python -c "import secrets; print(secrets.token_urlsafe(48))"
-   ```
+The base URL is configurable through `NEBIUS_TOKEN_FACTORY_BASE_URL`. Nebius's published quick-start also documents the regional endpoint:
 
-   The Python application does not automatically load `.env` files. Export variables before starting the processes, or configure them through your IDE or deployment platform. For example, on macOS/Linux:
+```text
+https://api.tokenfactory.us-central1.nebius.com/v1/
+```
 
-   ```bash
-   set -a
-   source .env
-   set +a
-   ```
+These are separate hostnames. Mnemos does not silently switch between them; configure the endpoint appropriate to the account and deployment, and verify it with a real request.
 
-4. Start the API in terminal one:
+The API reference is available at <https://api.tokenfactory.nebius.com/docs>.
 
-   ```bash
-   uvicorn backend.main:app --reload
-   ```
+### Why two model sizes
 
-   Check `http://127.0.0.1:8000/health` and open `http://127.0.0.1:8000/docs` for the API documentation. The database tables are initialized at API startup.
+The application separates the main reasoning path from lighter supporting tasks. Super is configured for the user-facing reasoning and synthesis path. Nano is configured for small classification and memory-extraction tasks and is also the fallback for eligible reasoning-model failures.
 
-5. Start Streamlit in terminal two:
+This is an application-level routing design, not a claim that Nano is always faster under every serving condition. Actual latency depends on the model version, endpoint, prompt and output lengths, queueing, region, and traffic. Mnemos does not publish a latency benchmark until a repeatable measurement has been run.
 
-   ```bash
-   streamlit run frontend/app.py
-   ```
+## How we use Tavily
 
-   Open the local URL Streamlit prints (usually `http://localhost:8501`). Register an account, then use the chat and memory bank.
+When web research is enabled, Mnemos calls Tavily's Search API at runtime. The research service sends the query, requests a bounded number of results, and passes the returned evidence snippets and URLs to the agent for synthesis. Source links are returned to the interface and retained in saved skill-run messages.
 
-If the backend runs on another host or port, set `MNEMOS_API_URL` for the frontend to the backend's reachable URL. In a containerized deployment, `127.0.0.1` from the frontend container refers to that frontend container, not the API container.
+Current integration details:
+
+- Search endpoint: `https://api.tavily.com/search`
+- Search depth: `basic` by default (the service also accepts `advanced` internally).
+- Maximum results: 5 by default in the agent/skill workflow; the service caps requests at 10.
+- Request timeout: 15 seconds by default.
+- Raw page content: disabled in the current search request (`include_raw_content: false`).
+- If the Tavily key is absent, Mnemos can continue with model-only responses.
+- If Tavily fails during a skill run, the workflow can continue without live research.
+
+**Scope clarification:** the current Mnemos research service uses Tavily Search and its returned snippets. It does not currently make a separate Tavily Extract API call. Therefore, this repository demonstrates functional runtime Tavily search, but does not claim a measured benchmark of Tavily's standalone extraction endpoint.
+
+## Setup
+
+### Requirements
+
+- Python 3.11 recommended (the backend Dockerfile uses Python 3.11).
+- A Nebius Token Factory API key for model-backed responses.
+- A Tavily API key for live web research (optional; search is skipped without it).
+- PostgreSQL for a hosted deployment with durable storage, or SQLite for local development.
+- Docker is optional for running the backend container.
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/AkankshaJagdish/mnemos.git
+cd mnemos
+
+python -m venv .venv
+
+# macOS / Linux
+source .venv/bin/activate
+
+# Windows PowerShell
+# .venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 2. Configure environment variables
+
+Copy `.env.example` to `.env` and fill in the required values. The application reads environment variables; it does **not** automatically load `.env` files. Export the values in your shell, configure them in your IDE, or use your deployment platform's secret manager.
+
+Minimum configuration for local chat:
+
+- `NEBIUS_TOKEN_FACTORY_KEY`
+- `MNEMOS_AUTH_SECRET`
+
+For Tavily research, also set `TAVILY_API_KEY`.
+
+Generate a strong authentication secret:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+For macOS/Linux, one way to export a local `.env` file is:
+
+```bash
+set -a
+source .env
+set +a
+```
+
+Never commit `.env`, API keys, database passwords, or signing secrets.
+
+### 3. Start the backend
+
+From the repository root:
+
+```bash
+uvicorn backend.main:app --reload
+```
+
+Check:
+
+- Health: <http://127.0.0.1:8000/health>
+- Interactive API docs: <http://127.0.0.1:8000/docs>
+
+### 4. Start the frontend
+
+In a second terminal:
+
+```bash
+streamlit run frontend/app.py
+```
+
+Open the local URL printed by Streamlit, usually <http://localhost:8501>. Register an account and use the chat, memory, conversation-history, and skills controls.
+
+If the backend is hosted elsewhere, set `MNEMOS_API_URL` in the frontend environment to its reachable URL.
+
+## Environment variables
+
+The following names are supported by the current repository configuration. Keep secrets in the deployment environment, not in source control.
+
+| Variable | Required? | Purpose / default |
+| --- | --- | --- |
+| `NEBIUS_TOKEN_FACTORY_KEY` | Yes for model inference | Token Factory API key. `NEBIUS_API_KEY` is accepted as an alternative. |
+| `NEBIUS_API_KEY` | Alternative | Alternative name for the Token Factory API key. |
+| `NEBIUS_TOKEN_FACTORY_BASE_URL` | No | Token Factory base URL; defaults to `https://api.tokenfactory.nebius.com/v1`. |
+| `NEBIUS_BASE_URL` | No | Legacy alternative base-URL setting if the primary variable is unset. |
+| `NEBIUS_REASONING_MODEL` | No | Reasoning model ID; defaults to `nvidia/nemotron-3-super-120b-a12b`. |
+| `NEBIUS_FAST_MODEL` | No | Fast model ID; defaults to `nvidia/Nemotron-3-Nano-30B`. |
+| `NEBIUS_REQUEST_TIMEOUT` | No | Token Factory request timeout in seconds; defaults to `60`. |
+| `TAVILY_API_KEY` | Optional | Enables Tavily live web search. |
+| `DATABASE_URL` | No | SQLAlchemy database URL; defaults to `sqlite:///./mnemos.db`. Use PostgreSQL for hosted durable storage. |
+| `MNEMOS_AUTH_SECRET` | Yes for secure deployment | Signing secret for authentication tokens. The development fallback must be replaced in any public deployment. |
+| `MNEMOS_API_URL` | No | Backend URL used by the Streamlit frontend; defaults to `http://127.0.0.1:8000`. |
+| `CORS_ORIGINS` | No | Comma-separated allowed origins; defaults to local Streamlit origins. |
+| `APP_NAME` | No | Application name; defaults to `Mnemos`. |
+| `APP_VERSION` | No | Application version; defaults to `0.1.0`. |
+| `ENVIRONMENT` | No | Environment label; defaults to `development`. |
+| `LOG_LEVEL` | No | Logging level; defaults to `INFO`. |
+| `MNEMOS_DEMO_MODE` | No | Optional demo-mode flag; defaults to `false`. |
+| `MNEMOS_MAX_ANSWER_TOKENS` | No | Application-side completion output cap; defaults to `900`. |
+| `MNEMOS_MAX_INPUT_MESSAGES` | No | Maximum messages passed to the model client; defaults to `20`. |
+| `MNEMOS_MAX_MESSAGE_CHARS` | No | Character cap per message sent to the model client; defaults to `12000`. |
+| `MNEMOS_FRONTEND_TIMEOUT` | No | Frontend HTTP request timeout in seconds; defaults to `90`. |
+
+Application-side token and context bounds help control individual requests. They are not provider-side spending caps or a guarantee of maximum cost.
 
 ## API overview
 
-| Method | Endpoint | Purpose | Authentication |
-| --- | --- | --- | --- |
-| `POST` | `/auth/register` | Create an account | No |
-| `POST` | `/auth/login` | Sign in and receive a bearer token | No |
-| `GET` | `/auth/me` | Return the current account | Yes |
-| `POST` | `/chat` | Run a chat turn and receive a complete JSON response | Yes |
-| `POST` | `/chat/stream` | Stream tokens and final metadata using Server-Sent Events (SSE) | Yes |
-| `GET` | `/conversations` | List the current user's saved conversations | Yes |
-| `GET` | `/conversations/{conversation_id}` | Read a saved conversation the user owns | Yes |
-| `GET` | `/memories` | List the signed-in user's memories | Yes |
-| `POST` | `/memories` | Save a memory for the signed-in user | Yes |
-| `DELETE` | `/memories` | Clear the signed-in user's saved memories | Yes |
-| `GET` | `/skills` | List saved skills; creates the three starter workflows for a new skill collection | Yes |
-| `POST` | `/skills` | Save a custom workflow | Yes |
-| `PATCH` | `/skills/{skill_id}` | Edit a saved workflow and its allowed tools | Yes |
-| `DELETE` | `/skills/{skill_id}` | Delete a saved workflow | Yes |
-| `POST` | `/skills/{skill_id}/run` | Run a workflow using allowed memory/Tavily services and Nebius inference | Yes |
-| `GET` | `/health` | Basic service status | No |
+The API is documented interactively at `/docs`. Principal routes include:
 
-The API ignores any user ID submitted by the client for operations that use account identity. It derives the owner from the verified bearer token.
-
-## Saved skills (MVP)
-
-On first opening the Skills section, Mnemos seeds three editable starter workflows for that account:
-
-- **Research Brief** — retrieves relevant saved memories, searches Tavily when configured, and asks Nemotron for a concise brief with evidence, source links, and uncertainties.
-- **Continue My Work** — uses relevant memories and recent conversation history to recap context, unresolved decisions, and next actions.
-- **Decision Memo** — combines relevant memories and optional Tavily research into options, trade-offs, risks, and a recommendation.
-
-The sidebar can run a skill, edit its instructions and tool permissions, and create custom skills. Skill runs are saved as ordinary user/assistant messages in the active conversation; if there is no active conversation, Mnemos creates one. They therefore appear in the chat transcript immediately and remain available through the existing conversation-history list after reopening the app. Research source links are included in the persisted assistant message. The run request accepts an optional `conversation_id` to continue the active thread. The tool allowlist is deliberately small (`memory`, `tavily`); users cannot save or execute Python, shell commands, or arbitrary tools. Tavily failures are non-fatal: the workflow can continue without live research. Skills and their conversation messages are stored in the same configured SQL database and scoped to the authenticated account.
-
-Implementation references: the database model/session/CRUD structure follows the straightforward relational patterns documented by [FastAPI](https://fastapi.tiangolo.com/tutorial/sql-databases/). Research workflows use the same evidence-first principles highlighted in [Tavily Use-Case Skills](https://github.com/tavily-ai/Use-Case-Skills): focused search, source verification, citation hygiene, and explicit coverage gaps. This service performs Tavily Search followed by bounded Tavily Extract on selected URLs.
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/auth/register` | Register an account |
+| `POST` | `/auth/login` | Authenticate and receive a bearer token |
+| `GET` | `/auth/me` | Read the authenticated account |
+| `POST` | `/chat` | Non-streaming chat |
+| `POST` | `/chat/stream` | Streaming chat |
+| `GET` | `/conversations` | List the current user's conversations |
+| `GET` | `/conversations/{conversation_id}` | Read a conversation owned by the current user |
+| `GET` | `/memories` | List the current user's memories |
+| `POST` | `/memories` | Add a memory |
+| `DELETE` | `/memories` | Delete the current user's saved memories |
+| `GET` | `/skills` | List skills and seed starter workflows where needed |
+| `POST` | `/skills` | Create a custom skill |
+| `PATCH` | `/skills/{skill_id}` | Edit a skill |
+| `DELETE` | `/skills/{skill_id}` | Delete a skill |
+| `POST` | `/skills/{skill_id}/run` | Run a saved workflow |
 
 ## Run tests
 
@@ -154,70 +297,45 @@ Implementation references: the database model/session/CRUD structure follows the
 pytest -q
 ```
 
-Tests use an isolated in-memory SQLite database and mock external API calls where appropriate. They do not require live Nebius or Tavily credentials.
+The automated suite uses isolated test data and mocks external services where appropriate. Passing offline tests does not prove that a live Token Factory model or Tavily request will succeed. Before a public demonstration, test the configured keys, exact model IDs, endpoint, database persistence, and a full multi-session workflow.
 
-## Docker: backend API
+## Deployment notes
 
-The Dockerfile packages the FastAPI backend. Run Streamlit separately as a frontend service or process.
+The frontend and backend are separate processes/services:
 
-```bash
-docker build -t mnemos-api .
-docker run --rm -p 8000:8000 \
-  -e NEBIUS_TOKEN_FACTORY_KEY="$NEBIUS_TOKEN_FACTORY_KEY" \
-  -e TAVILY_API_KEY="$TAVILY_API_KEY" \
-  -e MNEMOS_AUTH_SECRET="$MNEMOS_AUTH_SECRET" \
-  -v mnemos-data:/data \
-  mnemos-api
-```
+- Deploy the FastAPI backend and configure its provider keys, authentication secret, and durable `DATABASE_URL`.
+- Deploy the Streamlit frontend and set `MNEMOS_API_URL` to the backend's public HTTPS URL.
+- Configure the backend CORS settings for the actual frontend origin if required by the deployment.
+- Use PostgreSQL or another durable database for a hosted instance. Do not rely on an ephemeral container filesystem for SQLite persistence.
+- Keep the backend's API keys and database credentials in the host's secret manager.
+- Use HTTPS for public traffic.
 
-The named Docker volume persists the SQLite database at `/data/mnemos.db`. Use a strong `MNEMOS_AUTH_SECRET` and keep API keys in your deployment's secret manager. Do not expose a public instance with the default development secret.
+The public demo currently uses Streamlit for the frontend and FastAPI Cloud for the backend. The hosted database is configured separately from the local SQLite default.
 
-## How Mnemos uses NVIDIA Nemotron and Nebius
+## Limitations and security
 
-Mnemos uses the OpenAI-compatible chat completions interface exposed by Nebius Token Factory. The backend's `model_client.py` uses the `openai` Python SDK with the configured Token Factory base URL and API key. The configured reasoning and fast model IDs default to:
+Mnemos is a hackathon MVP, not a security-certified or fully production-hardened personal data platform.
 
-- `nvidia/nemotron-3-super-120b-a12b`
-- `nvidia/Nemotron-3-Nano-30B`
+- **External processing:** chat content is sent to Nebius Token Factory for inference. When web research is triggered, the query is sent to Tavily. Do not submit credentials, secrets, or information you do not want processed by these providers.
+- **Memory redaction:** email addresses and likely phone numbers are pattern-redacted before memory persistence. Pattern matching is imperfect and cannot guarantee detection of every sensitive value.
+- **Conversation history:** the memory redaction boundary does not mean all raw conversation messages are redacted. Avoid putting sensitive personal information into chats.
+- **Authentication:** password hashing and signed tokens are implemented, and protected operations are account-scoped. The MVP does not include email verification, password reset, MFA, rate limiting, or token revocation.
+- **Browser session:** the current frontend's refresh behavior uses a browser-readable cookie. This is not equivalent to an HttpOnly production session.
+- **Data ownership:** users can manage their account-scoped records in the application, but hosted data resides in the configured database. “Private” here means application-level account scoping, not local-only storage, end-to-end encryption, or a guarantee that data never leaves the deployment.
+- **Model access:** configured model IDs and endpoint permissions must be verified against the Token Factory catalog for the account.
+- **Tavily extraction:** the current implementation uses Search API result content, not a separately benchmarked Extract API workflow.
+- **NemoClaw/OpenShell:** integration is a future direction, not a currently implemented security boundary.
 
-These defaults reflect the project plan, not a guarantee that both identifiers are enabled for every account. Confirm the currently available model IDs and access in the Token Factory catalog and adjust the environment variables if needed. API reference: <https://api.tokenfactory.nebius.com/docs>.
+## Feedback
 
-## How Mnemos uses Tavily Search and Extract
-
-If `TAVILY_API_KEY` is set, the research service performs a two-step retrieval flow using direct HTTP requests in `backend/services/research_service.py`:
-
-1. **Search** calls `POST https://api.tavily.com/search` to discover up to five candidate pages.
-2. **Extract** selects up to the top three valid result URLs and calls `POST https://api.tavily.com/extract` with `extract_depth="basic"`, Markdown output, and images disabled.
-3. Successfully extracted `raw_content` is provided to the model as evidence and is reflected in each source snippet. If extraction fails, Mnemos falls back to the original search snippets instead of failing the whole research request.
-
-This is an intentional search-then-extract design: it limits extraction to pages surfaced by the query rather than spending requests extracting unfiltered content. Tavily documents this two-step approach as providing more control over source selection; its Extract API accepts one or multiple URLs (up to 20) and returns successful and failed extractions. See [Tavily Extract API](https://help.tavily.com/articles/8721959612-what-is-the-tavily-extract-api) and [Tavily's search-then-extract guidance](https://help.tavily.com/articles/3363168593-extracting-web-content-using-tavily).
-
-When `TAVILY_API_KEY` is absent, live research is skipped. Search failures are reported through the research service error path; extraction failures are logged and use search snippets as fallback. The offline tests mock both API calls; they do not prove live account availability or measure online extraction quality.
-
-
-## Security and MVP limitations
-
-- Configure a unique, high-entropy `MNEMOS_AUTH_SECRET` for every deployed environment. Rotating it invalidates existing bearer tokens.
-- Use HTTPS in public deployments. The API itself does not terminate TLS.
-- Account identity is derived from signed tokens, and the backend applies user scoping to chat and memory routes.
-- This is not a full production identity platform: there is no email verification, password reset, rate limiting, multi-factor authentication, or token revocation.
-- The frontend restores sign-in from a browser-readable cookie for MVP convenience. It is not an HttpOnly production session design; treat the deployment and host as trusted.
-- Local development and tests use SQLite. The hosted demo uses the configured Supabase PostgreSQL database for durable accounts, memories, conversations, and messages.
-- Do not put passwords, API keys, or other secrets into saved memories or prompts.
-- The configured model IDs and API permissions must be verified with the actual account. Live API integration is not covered by the offline test suite.
-
-## Privacy and failure handling
-
-- Email addresses and likely phone numbers are redacted before any memory is persisted, including manually added memories. Detection is pattern-based and cannot guarantee that every sensitive detail is detected.
-- Automatic memory extraction considers only the sanitized user message, not the assistant response. The extractor is instructed to avoid sensitive data, and the persistence layer applies redaction again as a final boundary.
-- The reasoning model is retried once with the configured Nano model when a reasoning completion fails. If both attempts fail, the request returns an error. Streaming may fall back to Nano only before it emits any text; it does not restart after partial output to avoid duplicated answers.
-- The UI prefers streaming but retains `/chat` as a non-streaming fallback when streaming is unavailable before output begins.
-- Chat content is sent to Nebius for inference. When research is triggered, the search query is sent to Tavily. Do not use Mnemos for secrets or information you do not want to send to these providers.
+See [FEEDBACK.md](FEEDBACK.md) for detailed, constructive feedback on Nebius Token Factory, NVIDIA Nemotron, and Tavily. It separates Mnemos implementation facts, public documentation, third-party developer reports, and observations that still require live measurement.
 
 ## Project structure
 
 ```text
 mnemos/
-├── frontend/app.py
+├── frontend/
+│   └── app.py
 ├── backend/
 │   ├── main.py
 │   ├── config.py
@@ -238,14 +356,6 @@ mnemos/
 │       ├── memories.py
 │       └── skills.py
 ├── tests/
-│   ├── conftest.py
-│   ├── test_chat.py
-│   ├── test_memory.py
-│   ├── test_skills.py
-│   ├── test_research.py
-│   ├── test_model_client.py
-│   ├── test_conversations.py
-│   └── test_cost_estimator.py
 ├── .env.example
 ├── .gitignore
 ├── Dockerfile
@@ -257,64 +367,4 @@ mnemos/
 
 ## License
 
-Mnemos is licensed under the MIT License. See [LICENSE](LICENSE).
-
-
-## Fix 1 deployment notes (2026-10-29)
-
-The current MVP revision includes a new-chat control, saved conversation history, best-effort browser refresh login restoration, explicit preference memory fallback, filtering of previously persisted tool-plan JSON from future history, and a Nano retry when the reasoning model returns a recognized internal tool-plan object instead of user-facing prose. See `CHANGES-FIX-1.md` and `CHANGES-PRESENTATION-2.md`.
-
-For hosted durable storage, configure the existing `DATABASE_URL` with your Supabase PostgreSQL connection and install the PostgreSQL driver already declared in `requirements.txt`. Do not use a local SQLite file for a hosted instance whose filesystem may be ephemeral.
-
-The cookie-based refresh behavior is an MVP convenience only: the cookie is readable by client-side JavaScript and is not a substitute for an HttpOnly production session.
-
-
-## Usage limits and cost controls
-
-Mnemos is a hackathon MVP. The owner of the deployed instance pays for provider usage. Free hosting does not make model inference or web research free.
-
-### Application-side bounds
-
-- `MNEMOS_MAX_ANSWER_TOKENS` caps output tokens per completion (default `900`). Set this to `600` or `700` for the judge demo.
-- `MNEMOS_MAX_INPUT_MESSAGES` bounds message count passed to the model (default `20`).
-- `MNEMOS_MAX_MESSAGE_CHARS` bounds each message's character length (default `12000`). These limits bound output and context size but are **not** a hard dollar budget.
-- Each ordinary chat can make more than one model call (for research classification and memory extraction). A failed Super call or recognized internal tool-plan response may trigger one Nano fallback.
-- Tavily search defaults to five results and a 15-second timeout. After search, Mnemos extracts up to three selected result URLs using the Tavily Extract API (basic depth, Markdown, no images; 30-second minimum extract timeout). If extraction fails, search snippets remain the fallback. Extraction therefore adds an upstream request and may add latency/credits; avoid repetitive exploratory requests during the public demo.
-
-### Recommended settings for a judge demo
-
-Set in FastAPI Cloud environment variables, then redeploy:
-
-```text
-MNEMOS_MAX_ANSWER_TOKENS=700
-MNEMOS_MAX_INPUT_MESSAGES=16
-MNEMOS_MAX_MESSAGE_CHARS=8000
-NEBIUS_REQUEST_TIMEOUT=60
-```
-
-These are app-level guardrails, not provider-imposed quotas or a guarantee of maximum spend. Do not alter the required NVIDIA Nemotron model IDs simply to control costs; use the configured Super/Nano design and check account usage.
-
-### Pricing and quotas (public rate-card snapshot: 29 October 2026)
-
-The public Nebius Nemotron pricing page currently lists these rates for Token Factory. Rates, model IDs, regions, caching treatment, and account-specific access can change, so verify the model row in your account's [Token Factory catalog](https://tokenfactory.nebius.com/) before the event. Source: [official Nebius Nemotron pricing](https://nebius.com/services/token-factory/models/nvidia-nemotron-models-inference), checked 29 October 2026.
-
-| Configured model | Input, per 1 million tokens | Output, per 1 million tokens |
-|---|---:|---:|
-| `nvidia/nemotron-3-super-120b-a12b` | $0.30 | $0.90 |
-| `nvidia/Nemotron-3-Nano-30B` (catalog naming may use `Nemotron-3-Nano-30B-A3B`) | $0.06 | $0.24 |
-
-**Token cost example:** an answer request using 4,000 input tokens and 700 output tokens would cost about **$0.00183 on Super** or **$0.000408 on Nano**, before any other model calls. These are illustrative estimates, not the total cost of one chat turn. Classification, automatic memory extraction, fallback retries, and longer accumulated history can add input/output usage.
-
-Tavily's public pricing page currently lists a free Researcher plan with **1,000 API credits per month**, no credit card required, and pay-as-you-go at **$0.008 per credit**. Some request types use more credits than others. Check your [Tavily dashboard](https://app.tavily.com/) and the [official pricing page](https://www.tavily.com/pricing) for the plan actually applied to your API key. Source checked 29 October 2026.
-
-Owner policy:
-
-1. Check Nebius usage and Tavily quota before and after judging; enable any available account-level spending alerts.
-2. Use prepared demo prompts, not load testing.
-3. Never publish API keys, database URLs, passwords, or auth secrets.
-4. If credits or quota approach their limit, pause the public demo or turn off web research rather than permit unbounded use.
-5. App token caps are not a global spend ceiling; provider-side usage monitoring remains necessary.
-
-## Saved conversation history
-
-The authenticated API exposes `GET /conversations` to list conversations owned by the signed-in user and `GET /conversations/{conversation_id}` to read a selected thread. Reading history does not rerun the prompt. The Streamlit sidebar lists saved conversations. Selecting a saved thread loads its prior messages and restores that conversation ID, so a follow-up continues that thread. Select **New chat** to begin a separate thread; this does not delete the saved conversation.
+MIT. See [LICENSE](LICENSE).
