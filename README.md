@@ -279,7 +279,7 @@ Mnemos is a hackathon MVP. The owner of the deployed instance pays for provider 
 - `MNEMOS_MAX_INPUT_MESSAGES` bounds message count passed to the model (default `20`).
 - `MNEMOS_MAX_MESSAGE_CHARS` bounds each message's character length (default `12000`). These limits bound output and context size but are **not** a hard dollar budget.
 - Each ordinary chat can make more than one model call (for research classification and memory extraction). A failed Super call or recognized internal tool-plan response may trigger one Nano fallback.
-- Tavily search defaults to five results and a 15-second timeout. Avoid repetitive exploratory requests during the public demo.
+- Tavily search defaults to five results and a 15-second timeout. After search, Mnemos extracts up to three selected result URLs using the Tavily Extract API (basic depth, Markdown, no images; 30-second minimum extract timeout). If extraction fails, search snippets remain the fallback. Extraction therefore adds an upstream request and may add latency/credits; avoid repetitive exploratory requests during the public demo.
 
 ### Recommended settings for a judge demo
 
