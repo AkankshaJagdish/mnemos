@@ -146,7 +146,7 @@ On first opening the Skills section, Mnemos seeds three editable starter workflo
 
 The sidebar can run a skill, edit its instructions and tool permissions, and create custom skills. Skill runs are saved as ordinary user/assistant messages in the active conversation; if there is no active conversation, Mnemos creates one. They therefore appear in the chat transcript immediately and remain available through the existing conversation-history list after reopening the app. Research source links are included in the persisted assistant message. The run request accepts an optional `conversation_id` to continue the active thread. The tool allowlist is deliberately small (`memory`, `tavily`); users cannot save or execute Python, shell commands, or arbitrary tools. Tavily failures are non-fatal: the workflow can continue without live research. Skills and their conversation messages are stored in the same configured SQL database and scoped to the authenticated account.
 
-Implementation references: the database model/session/CRUD structure follows the straightforward relational patterns documented by [FastAPI](https://fastapi.tiangolo.com/tutorial/sql-databases/). Research workflows use the same evidence-first principles highlighted in [Tavily Use-Case Skills](https://github.com/tavily-ai/Use-Case-Skills): focused search, source verification, citation hygiene, and explicit coverage gaps. This MVP uses the project’s existing Tavily search service rather than adding a new tool dependency.
+Implementation references: the database model/session/CRUD structure follows the straightforward relational patterns documented by [FastAPI](https://fastapi.tiangolo.com/tutorial/sql-databases/). Research workflows use the same evidence-first principles highlighted in [Tavily Use-Case Skills](https://github.com/tavily-ai/Use-Case-Skills): focused search, source verification, citation hygiene, and explicit coverage gaps. This service performs Tavily Search followed by bounded Tavily Extract on selected URLs.
 
 ## Run tests
 
@@ -181,9 +181,18 @@ Mnemos uses the OpenAI-compatible chat completions interface exposed by Nebius T
 
 These defaults reflect the project plan, not a guarantee that both identifiers are enabled for every account. Confirm the currently available model IDs and access in the Token Factory catalog and adjust the environment variables if needed. API reference: <https://api.tokenfactory.nebius.com/docs>.
 
-## How Mnemos uses Tavily
+## How Mnemos uses Tavily Search and Extract
 
-If `TAVILY_API_KEY` is set, the research service can submit search requests to Tavily and pass the returned evidence and URLs to the agent. If the key is missing, the application skips live research. API errors should be checked in the backend logs. Tavily's Python SDK and API examples are available at <https://github.com/tavily-ai/tavily-python>; this MVP currently uses a direct HTTP request in `research_service.py`.
+If `TAVILY_API_KEY` is set, the research service performs a two-step retrieval flow using direct HTTP requests in `backend/services/research_service.py`:
+
+1. **Search** calls `POST https://api.tavily.com/search` to discover up to five candidate pages.
+2. **Extract** selects up to the top three valid result URLs and calls `POST https://api.tavily.com/extract` with `extract_depth="basic"`, Markdown output, and images disabled.
+3. Successfully extracted `raw_content` is provided to the model as evidence and is reflected in each source snippet. If extraction fails, Mnemos falls back to the original search snippets instead of failing the whole research request.
+
+This is an intentional search-then-extract design: it limits extraction to pages surfaced by the query rather than spending requests extracting unfiltered content. Tavily documents this two-step approach as providing more control over source selection; its Extract API accepts one or multiple URLs (up to 20) and returns successful and failed extractions. See [Tavily Extract API](https://help.tavily.com/articles/8721959612-what-is-the-tavily-extract-api) and [Tavily's search-then-extract guidance](https://help.tavily.com/articles/3363168593-extracting-web-content-using-tavily).
+
+When `TAVILY_API_KEY` is absent, live research is skipped. Search failures are reported through the research service error path; extraction failures are logged and use search snippets as fallback. The offline tests mock both API calls; they do not prove live account availability or measure online extraction quality.
+
 
 ## Security and MVP limitations
 
